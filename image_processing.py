@@ -631,7 +631,7 @@ def parse_simple_prompt(prompt):
     objects = [
         # Humans
         "boy", "girl", "child", "person", "man", "woman", "people", "family", 
-        "hiker", "hikers", "knight", "footballer", "player", "moon" 
+        "hiker", "hikers", "knight", "footballer", "player", "boy playing guitar", "guitarist"
         
         # Animals  
         "monkey", "monkeys", "ape", "apes", "cow", "cows", "cattle", "dog", "dogs", "puppy", 
@@ -640,7 +640,7 @@ def parse_simple_prompt(prompt):
         "zebra", "giraffe", "lion", "tiger",
         
         # Vehicles
-        "car", "cars", "vehicle", "truck", "bus", "motorcycle", "bicycle", "bike", "boat", "aeroplane",  
+        "car", "cars", "vehicle", "truck", "bus", "motorcycle", "bicycle", "bike", "aeroplane", "boat", "guitar"
     ]
     
     locations = [
@@ -648,14 +648,14 @@ def parse_simple_prompt(prompt):
         "forest", "lake", "river", "stream", "meadow", "pasture", "cliff", "valley",
         "waterfall", "ocean", "sea", "desert", "farm", "hill", "hills", "temple", 
         "city", "masjid", "mosque", "sky", "space", "grass", "ground", "stadium",
-        "arena", "gym", "fitness", "yard", "countryside", "woods", "jungle", "dark_sky"
+        "arena", "gym", "fitness", "yard", "countryside", "woods", "jungle"
     ]
     
     actions = [
         "playing", "praying", "running", "walking", "sitting", "standing", "eating",
         "drinking", "sleeping", "climbing", "hiking", "swimming", "fishing", "jumping",
         "reading", "writing", "dancing", "singing", "talking", "laughing", "kicking",
-        "throwing", "catching", "flying"
+        "throwing", "catching"
     ]
     
     # Convert to lowercase for comparison
@@ -668,6 +668,7 @@ def parse_simple_prompt(prompt):
     action = None
     
     # Extract components from the prompt with priority
+    # Check each word in the prompt
     for word in prompt_words:
         # Check for exact matches first
         if word in objects and subject is None:
@@ -676,6 +677,23 @@ def parse_simple_prompt(prompt):
             location = word
         elif word in actions and action is None:
             action = word
+    
+    # Additional checks for partial matches or common phrases
+    prompt_text = " ".join(prompt_words)
+    
+    # Check for objects that might be missed
+    if subject is None:
+        for obj in objects:
+            if obj in prompt_text:
+                subject = obj
+                break
+    
+    # Check for locations that might be missed
+    if location is None:
+        for loc in locations:
+            if loc in prompt_text:
+                location = loc
+                break
     
     # Handle special cases and synonyms
     if subject:
@@ -708,11 +726,15 @@ def parse_simple_prompt(prompt):
         elif location in ["woods", "jungle"]:
             location = "forest"
     
-    # Special handling for "in gym" or "at stadium"
-    if "gym" in prompt_lower:
+    # Special handling for common phrases
+    if "in gym" in prompt_lower or "at gym" in prompt_lower:
         location = "gym"
-    elif "stadium" in prompt_lower:
+    elif "in stadium" in prompt_lower or "at stadium" in prompt_lower:
         location = "stadium"
+    elif "on beach" in prompt_lower or "at beach" in prompt_lower:
+        location = "beach"
+    elif "in mountains" in prompt_lower or "on mountains" in prompt_lower:
+        location = "mountains"
     
     print(f"🔍 Parsed: Subject='{subject}', Location='{location}', Action='{action}'")
     return subject, location, action
@@ -723,30 +745,28 @@ def create_composite_for_pair_db(subject_doc, background_doc, subject, db):
         print(f"📸 Loading images from database...")
         print(f"   Subject: {subject_doc['filename']}")
         print(f"   Background: {background_doc['filename']}")
-        
+
         # Load the images from database
         subject_image = db.get_image_data(subject_doc['image_id'])
         background_image = db.get_image_data(background_doc['image_id'])
-        
+
         if subject_image is None:
             print(f"❌ Failed to load subject image: {subject_doc['filename']}")
             return None, False
-            
+
         if background_image is None:
             print(f"❌ Failed to load background image: {background_doc['filename']}")
             return None, False
-        
+
         print(f"✅ Successfully loaded both images")
-        
-        # Process the images - put subject in the background
-        # Note: We want the subject on the background, so subject goes to background image
+
+        # Fix: Ensure subject image gets subject label for detection
         object1, object2, background1, background2, merged1, merged2 = swap_objects_with_positioning(
-            background_image, subject_image, None, subject)
-        
-        # We want the subject (from subject_image) on the background (from background_image)
-        # So we use merged1 (subject_image object on background_image background)
-        return merged1, True
-        
+            subject_image, background_image, subject, None)
+
+        # We want the subject on the background → use merged2 (subject on background)
+        return merged2, True
+
     except ValueError as ve:
         print(f"⚠️ Object detection issue: {str(ve)}")
         return None, False
@@ -761,11 +781,13 @@ def display_single_best_result_db(prompt, db):
     print(f"\n🔍 Parsed prompt - Subject: {subject}, Location: {location}, Action: {action}")
     
     if not subject:
-        print("❌ Could not identify a subject in the prompt. Please specify an object (like 'boy', 'bird', 'cow', etc.)")
+        print("❌ Could not identify a subject in the prompt. Please specify an object (like 'boy', 'bird', 'cow', 'monkey', etc.)")
+        print(f"💡 Available objects: boy, girl, person, monkey, cow, dog, cat, bird, car, etc.")
         return None
     
     if not location:
-        print("❌ Could not identify a location in the prompt. Please specify a background (like 'mountains', 'park', 'masjid', etc.)")
+        print("❌ Could not identify a location in the prompt. Please specify a background (like 'mountains', 'park', 'beach', 'masjid', etc.)")
+        print(f"💡 Available locations: mountains, park, beach, forest, city, masjid, stadium, gym, etc.")
         return None
     
     # Search for matching images in database
@@ -777,37 +799,63 @@ def display_single_best_result_db(prompt, db):
     
     print(f"📊 Found {len(subject_matches)} subject matches and {len(location_matches)} location matches")
     
-    # Enhanced fallback logic
+    # Enhanced fallback logic with better subject matching
     if not subject_matches:
         print(f"⚠️ No direct matches for '{subject}', trying broader search...")
         # Try broader categories
         fallback_subjects = {
+            "monkey": ["animal", "ape", "monkeys"],
             "bird": ["animal"], 
             "person": ["boy", "girl", "man", "woman", "child"],
-            "animal": ["cow", "dog", "cat", "sheep", "horse"]
+            "animal": ["cow", "dog", "cat", "sheep", "horse", "monkey"],
+            "cow": ["animal", "cattle"],
+            "dog": ["animal", "puppy"],
+            "cat": ["animal", "kitten"]
         }
         
-        for fallback in fallback_subjects.get(subject, ["person"]):
+        # Try direct fallbacks first
+        for fallback in fallback_subjects.get(subject, []):
             subject_matches = db.search_images("object", fallback, limit=5)
             if subject_matches:
                 print(f"✅ Found fallback matches for '{fallback}'")
                 break
+        
+        # If still no matches, try generic "animal" or "person"
+        if not subject_matches:
+            for generic_term in ["animal", "person"]:
+                subject_matches = db.search_images("object", generic_term, limit=5)
+                if subject_matches:
+                    print(f"✅ Found generic matches for '{generic_term}'")
+                    break
     
     if not location_matches:
         print(f"⚠️ No direct matches for '{location}', trying broader search...")
         # Try related locations
         fallback_locations = {
+            "beach": ["ocean", "sea", "water", "coast"],
             "masjid": ["mosque", "religious", "temple"],
             "mosque": ["masjid", "religious", "temple"],
             "mountains": ["mountain", "hills", "nature"],
-            "park": ["garden", "field", "outdoor"]
+            "park": ["garden", "field", "outdoor"],
+            "forest": ["woods", "jungle", "trees"],
+            "city": ["urban", "town"],
+            "stadium": ["arena", "field", "sports"],
+            "gym": ["fitness", "exercise"]
         }
         
-        for fallback in fallback_locations.get(location, ["park", "field"]):
+        for fallback in fallback_locations.get(location, []):
             location_matches = db.search_images("background", fallback, limit=5)
             if location_matches:
                 print(f"✅ Found fallback matches for '{fallback}'")
                 break
+        
+        # If still no matches, try generic locations
+        if not location_matches:
+            for generic_location in ["park", "field", "outdoor"]:
+                location_matches = db.search_images("background", generic_location, limit=5)
+                if location_matches:
+                    print(f"✅ Found generic matches for '{generic_location}'")
+                    break
     
     # If still no matches, get any available images
     if not subject_matches:
@@ -879,74 +927,13 @@ def display_single_best_result_db(prompt, db):
     return None
 
 def display_all_matching_results_db(prompt, subject_matches, location_matches, db):
-    """Display only 2 best different combinations of matching images from database"""
+    """Display only 2 best different combinations with DIFFERENT objects and backgrounds"""
     if not subject_matches or not location_matches:
         print("No matching images found for the prompt components.")
         return
     
     print(f"\nFound {len(subject_matches)} subject matches and {len(location_matches)} location matches")
-    print("Creating 2 best different combinations...")
-    
-    # Take top 2 subjects and top 2 locations to ensure variety
-    top_subjects = subject_matches[:2]  # Top 2 subjects
-    top_locations = location_matches[:2]  # Top 2 locations
-    
-    # Create exactly 2 different combinations
-    combinations = []
-    
-    # Combination 1: Best subject + Best location
-    if len(top_subjects) > 0 and len(top_locations) > 0:
-        combinations.append((top_subjects[0], top_locations[0]))
-    
-    # Combination 2: Different pairing to ensure variety
-    if len(top_subjects) > 1 and len(top_locations) > 1:
-        # Second subject + Second location
-        combinations.append((top_subjects[1], top_locations[1]))
-    elif len(top_subjects) > 1 and len(top_locations) > 0:
-        # Second subject + First location
-        combinations.append((top_subjects[1], top_locations[0]))
-    elif len(top_subjects) > 0 and len(top_locations) > 1:
-        # First subject + Second location
-        combinations.append((top_subjects[0], top_locations[1]))
-    
-    # Ensure we have exactly 2 combinations and they are different
-    if len(combinations) < 2 and len(combinations) > 0:
-        # If we only have one combination, try to create a second one with different images
-        if len(subject_matches) > 1 or len(location_matches) > 1:
-            # Try to find a different combination
-            for i, subj in enumerate(subject_matches[:3]):
-                for j, loc in enumerate(location_matches[:3]):
-                    new_combo = (subj, loc)
-                    # Check if this combination is different from existing ones
-                    is_different = True
-                    for existing_combo in combinations:
-                        if (new_combo[0]['filename'] == existing_combo[0]['filename'] and 
-                            new_combo[1]['filename'] == existing_combo[1]['filename']):
-                            is_different = False
-                            break
-                    
-                    if is_different:
-                        combinations.append(new_combo)
-                        break
-                if len(combinations) >= 2:
-                    break
-    
-    # Limit to exactly 2 combinations
-    combinations = combinations[:2]
-    total_combinations = len(combinations)
-    
-    if total_combinations == 0:
-        print("❌ Could not create any valid combinations.")
-        return []
-    
-    print(f"Displaying {total_combinations} best different combinations")
-    
-    # Create the main figure
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
-    if total_combinations == 1:
-        axes = [axes]
-    
-    fig.suptitle(f"Top {total_combinations} Different Combinations for: '{prompt}'", fontsize=16, fontweight='bold')
+    print("Creating 2 best combinations with different objects and backgrounds...")
     
     # Parse prompt for subject identification
     subject, location, action = parse_simple_prompt(prompt)
@@ -956,79 +943,215 @@ def display_all_matching_results_db(prompt, subject_matches, location_matches, d
     os.makedirs(output_dir, exist_ok=True)
     
     successful_composites = []
+    used_subjects = set()  # Track used subject files
+    used_backgrounds = set()  # Track used background files
+    max_attempts = 10  # Limit attempts to avoid infinite loops
     
-    # Generate the combinations
-    for idx, (subject_doc, location_doc) in enumerate(combinations):
-        print(f"Processing combination {idx + 1}/{total_combinations}: "
-              f"{subject_doc['filename']} + {location_doc['filename']}")
+    print(f"🔍 Searching for diverse combinations...")
+    
+    # Try to find 2 combinations with different subjects AND different backgrounds
+    for attempt in range(max_attempts):
+        if len(successful_composites) >= 2:
+            break
+            
+        best_combo = None
+        best_score = -1
         
-        # Create composite
-        composite, success = create_composite_for_pair_db(subject_doc, location_doc, subject, db)
+        # Find the best unused combination
+        for subj_idx, subject_doc in enumerate(subject_matches):
+            for loc_idx, location_doc in enumerate(location_matches):
+                # Check if this combination uses unused subject and background
+                subj_filename = subject_doc['filename']
+                bg_filename = location_doc['filename']
+                
+                # Skip if we've already used this subject or background
+                if subj_filename in used_subjects or bg_filename in used_backgrounds:
+                    continue
+                
+                # Calculate combination score
+                combo_score = subject_doc['score'] + location_doc['score']
+                
+                if combo_score > best_score:
+                    best_score = combo_score
+                    best_combo = (subject_doc, location_doc, subj_filename, bg_filename)
         
-        if success and composite is not None:
-            # Display in subplot
-            ax = axes[idx] if total_combinations > 1 else axes[0]
-            ax.imshow(composite)
-            ax.set_title(f"Combo {idx + 1}\n{subject_doc['filename']}\n+ {location_doc['filename']}", 
-                       fontsize=12, fontweight='bold')
-            ax.axis('off')
+        # If we found a good unused combination, try to create composite
+        if best_combo:
+            subject_doc, location_doc, subj_filename, bg_filename = best_combo
             
-            # Save individual result
-            prompt_slug = prompt.replace(' ', '_').lower()
-            output_filename = f"{prompt_slug}_combo_{idx + 1}.jpg"
-            output_path = os.path.join(output_dir, output_filename)
-            plt.imsave(output_path, composite)
+            print(f"🔄 Attempt {len(successful_composites) + 1}: {subj_filename} + {bg_filename}")
             
-            successful_composites.append({
-                'composite': composite,
-                'subject_file': subject_doc['filename'],
-                'location_file': location_doc['filename'],
-                'output_path': output_path,
-                'subject_score': subject_doc['score'],
-                'location_score': location_doc['score'],
-                'total_score': subject_doc['score'] + location_doc['score']
-            })
+            # Create composite
+            composite, success = create_composite_for_pair_db(subject_doc, location_doc, subject, db)
             
-            print(f"✅ Success - Saved to {output_path}")
+            if success and composite is not None:
+                # Mark as used
+                used_subjects.add(subj_filename)
+                used_backgrounds.add(bg_filename)
+                
+                successful_composites.append({
+                    'composite': composite,
+                    'subject_file': subj_filename,
+                    'location_file': bg_filename,
+                    'subject_score': subject_doc['score'],
+                    'location_score': location_doc['score'],
+                    'total_score': best_score,
+                    'subject_doc': subject_doc,
+                    'location_doc': location_doc
+                })
+                
+                print(f"✅ Success - Added combination {len(successful_composites)}")
+            else:
+                print(f"❌ Failed to create composite")
         else:
-            # Display placeholder for failed combination
-            ax = axes[idx] if total_combinations > 1 else axes[0]
-            ax.text(0.5, 0.5, 'Failed to\ncreate composite', 
-                   ha='center', va='center', fontsize=12, color='red',
-                   bbox=dict(boxstyle="round,pad=0.3", facecolor="lightcoral", alpha=0.7))
-            ax.set_title(f"Combo {idx + 1}\n{subject_doc['filename']}\n+ {location_doc['filename']}", 
-                       fontsize=12, fontweight='bold')
-            ax.axis('off')
-            print(f"❌ Failed")
+            # No more unused combinations available
+            print(f"⚠️ No more unique combinations available after {len(successful_composites)} successful ones")
+            break
+    
+    # If we couldn't get 2 different combinations, try with relaxed constraints
+    if len(successful_composites) < 2:
+        print(f"🔄 Trying with relaxed constraints (allowing same background but different subjects)...")
+        used_subjects.clear()  # Reset used subjects, keep used backgrounds
+        
+        for subject_doc in subject_matches:
+            if len(successful_composites) >= 2:
+                break
+                
+            subj_filename = subject_doc['filename']
+            if subj_filename in used_subjects:
+                continue
+                
+            # Find best background that gives different combination
+            for location_doc in location_matches:
+                bg_filename = location_doc['filename']
+                
+                # Check if this would create a truly different combination
+                combo_exists = any(
+                    comp['subject_file'] == subj_filename and comp['location_file'] == bg_filename
+                    for comp in successful_composites
+                )
+                
+                if not combo_exists:
+                    print(f"🔄 Relaxed attempt {len(successful_composites) + 1}: {subj_filename} + {bg_filename}")
+                    
+                    composite, success = create_composite_for_pair_db(subject_doc, location_doc, subject, db)
+                    
+                    if success and composite is not None:
+                        used_subjects.add(subj_filename)
+                        
+                        successful_composites.append({
+                            'composite': composite,
+                            'subject_file': subj_filename,
+                            'location_file': bg_filename,
+                            'subject_score': subject_doc['score'],
+                            'location_score': location_doc['score'],
+                            'total_score': subject_doc['score'] + location_doc['score'],
+                            'subject_doc': subject_doc,
+                            'location_doc': location_doc
+                        })
+                        
+                        print(f"✅ Success - Added combination {len(successful_composites)}")
+                        break
+    
+    total_combinations = len(successful_composites)
+    
+    if total_combinations == 0:
+        print("❌ Could not create any valid combinations.")
+        return []
+    
+    print(f"Displaying {total_combinations} different combinations")
+    
+    # Create the main figure
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+    if total_combinations == 1:
+        axes = [axes]
+    
+    fig.suptitle(f"Top {total_combinations} DIFFERENT Combinations for: '{prompt}'", fontsize=16, fontweight='bold')
+    
+    # Display the combinations
+    for idx, comp_data in enumerate(successful_composites):
+        if idx >= 2:  # Limit to 2 combinations max
+            break
+            
+        composite = comp_data['composite']
+        subject_file = comp_data['subject_file']
+        location_file = comp_data['location_file']
+        
+        # Display in subplot
+        ax = axes[idx] if total_combinations > 1 else axes[0]
+        ax.imshow(composite)
+        ax.set_title(f"Combination {idx + 1}\n{subject_file}\n+ {location_file}", 
+                   fontsize=12, fontweight='bold')
+        ax.axis('off')
+        
+        # Save individual result
+        prompt_slug = prompt.replace(' ', '_').lower()
+        output_filename = f"{prompt_slug}_combo_{idx + 1}.jpg"
+        output_path = os.path.join(output_dir, output_filename)
+        plt.imsave(output_path, composite)
+        comp_data['output_path'] = output_path
+        
+        print(f"✅ Saved combination {idx + 1} to {output_path}")
     
     # Hide unused subplot if only 1 combination
-    if total_combinations == 1:
+    if total_combinations == 1 and len(axes) > 1:
         axes[1].axis('off')
     
     plt.tight_layout()
     plt.show()
     
-    # Print summary
+    # Print summary with diversity information
     print(f"\n📊 Summary:")
-    print(f"Total combinations attempted: {total_combinations}")
-    print(f"Successful composites: {len(successful_composites)}")
-    if total_combinations > 0:
-        print(f"Success rate: {len(successful_composites)/total_combinations*100:.1f}%")
+    print(f"Total combinations created: {total_combinations}")
+    print(f"Unique subjects used: {len(used_subjects)}")
+    print(f"Unique backgrounds used: {len(used_backgrounds)}")
     
     if successful_composites:
-        # Sort by total score (best matches first)
-        successful_composites.sort(key=lambda x: x['total_score'], reverse=True)
-        
-        print(f"\n🏆 Best combinations (by matching score):")
+        print(f"\n🏆 Different combinations created:")
         for i, comp in enumerate(successful_composites, 1):
-            print(f"{i}. {comp['subject_file']} + {comp['location_file']} "
-                  f"(Score: {comp['total_score']}) -> {comp['output_path']}")
+            print(f"{i}. Subject: {comp['subject_file']} + Background: {comp['location_file']} "
+                  f"(Score: {comp['total_score']}) -> {comp.get('output_path', 'Not saved')}")
+        
+        # Check diversity
+        unique_subjects = set(comp['subject_file'] for comp in successful_composites)
+        unique_backgrounds = set(comp['location_file'] for comp in successful_composites)
+        
+        print(f"\n🎯 Diversity Check:")
+        print(f"   Different subjects: {len(unique_subjects)}/{len(successful_composites)}")
+        print(f"   Different backgrounds: {len(unique_backgrounds)}/{len(successful_composites)}")
+        
+        if len(unique_subjects) == len(successful_composites) and len(unique_backgrounds) == len(successful_composites):
+            print("   ✅ Perfect diversity achieved!")
+        elif len(unique_subjects) == len(successful_composites):
+            print("   ✅ All subjects are different")
+        elif len(unique_backgrounds) == len(successful_composites):
+            print("   ✅ All backgrounds are different")
+        else:
+            print("   ⚠️ Some subjects or backgrounds are repeated")
     
     return successful_composites
 
-# Usage example functions
+def search_diverse_images(db, query_type, search_term, limit=10, exclude_filenames=None):
+    """Enhanced search function that can exclude already used images"""
+    if exclude_filenames is None:
+        exclude_filenames = set()
+    
+    # Get all matches first
+    all_matches = db.search_images(query_type, search_term, limit=limit*2)  # Get more to filter
+    
+    # Filter out excluded filenames
+    filtered_matches = []
+    for match in all_matches:
+        if match['filename'] not in exclude_filenames:
+            filtered_matches.append(match)
+        if len(filtered_matches) >= limit:
+            break
+    
+    return filtered_matches
+
+
 def main_interactive_db():
-    """Main interactive function for database-based image swapping"""
+    """Main interactive function for database-based image swapping with enhanced diversity"""
     print("🎨 AI Image Swapping System with Database Storage")
     print("=" * 50)
     
@@ -1039,7 +1162,7 @@ def main_interactive_db():
         print("\nOptions:")
         print("1. Add images to database from folder")
         print("2. Search and create single best composite")
-        print("3. Search and show all matching combinations")
+        print("3. Search and show DIFFERENT matching combinations")  # Updated description
         print("4. View database statistics")
         print("5. Exit")
         
@@ -1063,14 +1186,31 @@ def main_interactive_db():
             prompt = input("\nEnter your prompt (e.g., 'boy in mountains'): ").strip()
             if prompt:
                 subject, location, action = parse_simple_prompt(prompt)
-                subject_matches = db.search_images("object", subject, limit=5) if subject else []
-                location_matches = db.search_images("background", location, limit=5) if location else []
                 
-                if subject_matches and location_matches:
-                    results = display_all_matching_results_db(prompt, subject_matches, location_matches, db)
-                    print(f"✅ Generated {len(results)} successful combinations!")
+                if subject and location:
+                    # Get more matches to ensure diversity
+                    subject_matches = db.search_images("object", subject, limit=10) if subject else []
+                    location_matches = db.search_images("background", location, limit=10) if location else []
+                    
+                    if subject_matches and location_matches:
+                        print(f"🔍 Found {len(subject_matches)} subject matches and {len(location_matches)} background matches")
+                        print("🎯 Ensuring different objects and backgrounds in each combination...")
+                        
+                        results = display_all_matching_results_db(prompt, subject_matches, location_matches, db)
+                        
+                        if results:
+                            print(f"✅ Generated {len(results)} diverse combinations!")
+                        else:
+                            print("❌ Could not create any successful combinations.")
+                    else:
+                        print("❌ No matching images found for this prompt.")
+                        if not subject_matches:
+                            print(f"   No matches found for subject: {subject}")
+                        if not location_matches:
+                            print(f"   No matches found for location: {location}")
                 else:
-                    print("❌ No matching images found for this prompt.")
+                    print("❌ Could not parse the prompt properly.")
+                    print("💡 Please use format like: 'boy in mountains', 'cow in farm', 'monkey in forest'")
         
         elif choice == '4':
             images_info = db.get_all_images_info()
@@ -1088,6 +1228,10 @@ def main_interactive_db():
             
             print(f"\nObject types: {dict(sorted(object_types.items()))}")
             print(f"Background types: {dict(sorted(background_types.items()))}")
+            
+            # Show diversity potential
+            print(f"\n🎯 Diversity Potential:")
+            print(f"Maximum different combinations possible: {len(object_types)} × {len(background_types)} = {len(object_types) * len(background_types)}")
         
         elif choice == '5':
             print("👋 Goodbye!")
@@ -1096,13 +1240,3 @@ def main_interactive_db():
         
         else:
             print("❌ Invalid choice. Please try again.")
-
-if __name__ == "__main__":
-    # Example usage
-    try:
-        main_interactive_db()
-    except KeyboardInterrupt:
-        print("\n\n👋 Program interrupted by user. Goodbye!")
-    except Exception as e:
-        print(f"\n❌ An error occurred: {str(e)}")
-        print("Please check your setup and try again.")
