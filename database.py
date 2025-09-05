@@ -1,4 +1,3 @@
-import streamlit as st
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
@@ -13,136 +12,43 @@ import gridfs
 from PIL import Image
 import io
 import base64
-import tempfile
-from pathlib import Path
-import time
-
-# Set page config
-st.set_page_config(
-    page_title="AI Image Swapping System",
-    page_icon="🎨",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Custom CSS for better styling
-st.markdown("""
-<style>
-    .main-header {
-        text-align: center;
-        color: #1f77b4;
-        font-size: 2.5rem;
-        font-weight: bold;
-        margin-bottom: 2rem;
-    }
-    
-    .status-success {
-        color: #28a745;
-        font-weight: bold;
-    }
-    
-    .status-error {
-        color: #dc3545;
-        font-weight: bold;
-    }
-    
-    .status-warning {
-        color: #ffc107;
-        font-weight: bold;
-    }
-    
-    .status-info {
-        color: #17a2b8;
-        font-weight: bold;
-    }
-    
-    .metric-box {
-        background-color: #f8f9fa;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 4px solid #1f77b4;
-        margin: 0.5rem 0;
-    }
-    
-    .image-info {
-        background-color: #e9ecef;
-        padding: 0.5rem;
-        border-radius: 0.25rem;
-        margin: 0.25rem 0;
-        font-size: 0.9rem;
-    }
-    
-    .feature-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 1.5rem;
-        border-radius: 1rem;
-        margin: 1rem 0;
-        text-align: center;
-    }
-    
-    .stButton > button {
-        width: 100%;
-        border-radius: 0.5rem;
-        border: none;
-        padding: 0.5rem 1rem;
-        font-weight: bold;
-        transition: all 0.3s ease;
-    }
-    
-    .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
-    }
-    
-    .upload-area {
-        border: 2px dashed #1f77b4;
-        border-radius: 1rem;
-        padding: 2rem;
-        text-align: center;
-        background-color: #f8f9fa;
-        margin: 1rem 0;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 class ImageDatabase:
     """Database handler for storing and retrieving images with descriptions"""
     
     def __init__(self, connection_string="mongodb://localhost:27017/", db_name="image_swapping_db"):
         """Initialize MongoDB connection and GridFS for image storage"""
-        try:
-            self.client = MongoClient(connection_string, serverSelectionTimeoutMS=5000)
-            # Test connection
-            self.client.server_info()
-            self.db = self.client[db_name]
-            self.fs = gridfs.GridFS(self.db)
-            self.collection = self.db.images
-            
-            # Create indexes for faster searching
-            self.collection.create_index("object_type")
-            self.collection.create_index("background_type")
-            self.collection.create_index("description")
-            
-            self.connected = True
-        except Exception as e:
-            st.error(f"Failed to connect to MongoDB: {str(e)}")
-            st.error("Please ensure MongoDB is running on localhost:27017")
-            self.connected = False
+        self.client = MongoClient(connection_string)
+        self.db = self.client[db_name]
+        self.fs = gridfs.GridFS(self.db)
+        self.collection = self.db.images
         
-    def store_image(self, image_data, filename, object_type, background_type, description=""):
-        """Store image in database with metadata"""
-        if not self.connected:
-            return None
-            
+        # Create indexes for faster searching
+        self.collection.create_index("object_type")
+        self.collection.create_index("background_type")
+        self.collection.create_index("description")
+        
+    def store_image(self, image_path, object_type, background_type, description=""):
+        """Store image in database with metadata
+        
+        Args:
+            image_path: Path to the image file
+            object_type: Type of object in image (e.g., 'boy', 'cow', 'car')
+            background_type: Type of background (e.g., 'mountains', 'park', 'city')
+            description: Additional description
+        """
         try:
+            # Read and store image in GridFS
+            with open(image_path, 'rb') as f:
+                image_data = f.read()
+            
             # Store image in GridFS
-            image_id = self.fs.put(image_data, filename=filename)
+            image_id = self.fs.put(image_data, filename=os.path.basename(image_path))
             
             # Store metadata in collection
             metadata = {
                 'image_id': image_id,
-                'filename': filename,
+                'filename': os.path.basename(image_path),
                 'object_type': object_type.lower(),
                 'background_type': background_type.lower(),
                 'description': description.lower(),
@@ -150,10 +56,11 @@ class ImageDatabase:
             }
             
             result = self.collection.insert_one(metadata)
+            print(f"✅ Stored image: {os.path.basename(image_path)} with ID: {result.inserted_id}")
             return result.inserted_id
             
         except Exception as e:
-            st.error(f"Error storing image {filename}: {str(e)}")
+            print(f"❌ Error storing image {image_path}: {str(e)}")
             return None
     
     def _generate_keywords(self, object_type, background_type, description):
@@ -168,6 +75,8 @@ class ImageDatabase:
             "person": ["person", "human", "man", "woman", "people", "adult", "boy", "girl"],
             "man": ["man", "person", "guy", "male", "adult", "human"],
             "woman": ["woman", "person", "lady", "female", "adult", "human"],
+            "polar bear": ["polar bear", "white bear", "arctic bear", "snow animal", "bear", "wildlife"],
+            "bear": ["bear", "grizzly", "brown bear", "wildlife"],
             "cow": ["cow", "cattle", "animal", "farm", "livestock"],
             "dog": ["dog", "puppy", "canine", "pet", "animal"],
             "cat": ["cat", "kitten", "feline", "pet", "animal"],
@@ -215,54 +124,58 @@ class ImageDatabase:
         return list(set(keywords))  # Remove duplicates
     
     def search_images(self, query_type, search_term, limit=10):
-        """Search for images by object or background type"""
-        if not self.connected:
-            return []
-            
         search_field = f"{query_type}_type"
         results = []
-        
-        try:
-            # Direct match
-            direct_matches = list(self.collection.find({search_field: search_term.lower()}).limit(limit))
+
+        # High-priority exact match on both field and keywords
+        exact_keyword_matches = list(self.collection.find({
+            search_field: search_term.lower(),
+            "keywords": {"$in": [search_term.lower()]}
+        }).limit(limit))
+        for doc in exact_keyword_matches:
+            doc['score'] = 25
+            results.append(doc)
+
+        # Fallback: direct match only
+        if len(results) < limit:
+            direct_matches = list(self.collection.find({search_field: search_term.lower()}).limit(limit - len(results)))
             for doc in direct_matches:
-                doc['score'] = 20  # High score for direct match
+                doc['score'] = 20
                 results.append(doc)
-            
-            # Keyword match
-            if len(results) < limit:
-                keyword_matches = list(self.collection.find({
-                    "keywords": {"$in": [search_term.lower()]}
-                }).limit(limit - len(results)))
-                
-                for doc in keyword_matches:
-                    if doc not in results:  # Avoid duplicates
-                        doc['score'] = 10  # Medium score for keyword match
-                        results.append(doc)
-            
-            # Text search in description
-            if len(results) < limit:
-                text_matches = list(self.collection.find({
-                    "description": {"$regex": search_term.lower(), "$options": "i"}
-                }).limit(limit - len(results)))
-                
-                for doc in text_matches:
-                    if doc not in results:  # Avoid duplicates
-                        doc['score'] = 5  # Low score for text match
-                        results.append(doc)
-            
-            # Sort by score
-            results.sort(key=lambda x: x['score'], reverse=True)
-            return results
-        except Exception as e:
-            st.error(f"Error searching images: {str(e)}")
-            return []
+
+        # Fallback: keyword match only
+        if len(results) < limit:
+            keyword_matches = list(self.collection.find({
+                "keywords": {"$in": [search_term.lower()]}
+            }).limit(limit - len(results)))
+            for doc in keyword_matches:
+                if doc not in results:
+                    doc['score'] = 10
+                    results.append(doc)
+
+        # Fallback: text search
+        if len(results) < limit:
+            text_matches = list(self.collection.find({
+                "description": {"$regex": search_term.lower(), "$options": "i"}
+            }).limit(limit - len(results)))
+            for doc in text_matches:
+                if doc not in results:
+                    doc['score'] = 5
+                    results.append(doc)
+
+        # Sort results
+        results.sort(key=lambda x: x['score'], reverse=True)
+        return results
     
     def get_image_data(self, image_id):
-        """Retrieve image data from GridFS"""
-        if not self.connected:
-            return None
+        """Retrieve image data from GridFS
+        
+        Args:
+            image_id: GridFS image ID
             
+        Returns:
+            numpy array: Image as RGB array
+        """
         try:
             # Get image from GridFS
             grid_out = self.fs.get(image_id)
@@ -276,52 +189,94 @@ class ImageDatabase:
             return np.array(pil_image)
             
         except Exception as e:
-            st.error(f"Error retrieving image {image_id}: {str(e)}")
+            print(f"❌ Error retrieving image {image_id}: {str(e)}")
             return None
+    
+    def populate_from_folder(self, images_dir):
+        """Populate database from existing images folder
+        
+        This method helps migrate from folder-based to database storage.
+        It tries to extract object and background info from filenames.
+        """
+        if not os.path.exists(images_dir):
+            print(f"❌ Images directory {images_dir} not found")
+            return
+        
+        image_files = [f for f in os.listdir(images_dir) 
+                      if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
+        
+        print(f"📁 Found {len(image_files)} images to process...")
+        
+        for filename in image_files:
+            image_path = os.path.join(images_dir, filename)
+            
+            # Try to parse filename for object and background info
+            object_type, background_type = self._parse_filename(filename)
+            
+            # If parsing fails, ask user for input
+            if not object_type or not background_type:
+                print(f"\n🖼️  Processing: {filename}")
+                object_type = input(f"Enter object type for {filename} (e.g., boy, cow, car): ").strip()
+                background_type = input(f"Enter background type for {filename} (e.g., mountains, park, city): ").strip()
+            
+            description = f"{object_type} in {background_type}"
+            
+            # Store in database
+            self.store_image(image_path, object_type, background_type, description)
+    
+    def _parse_filename(self, filename):
+        """Try to extract object and background from filename patterns"""
+        filename_lower = filename.lower().replace('.jpg', '').replace('.jpeg', '').replace('.png', '')
+        
+        # Pattern: object_X_background_Y
+        if '_background_' in filename_lower:
+            parts = filename_lower.split('_background_')
+            if len(parts) == 2:
+                object_part = parts[0].replace('object_', '')
+                background_part = parts[1]
+                return object_part, background_part
+        
+        # Pattern: objectname_backgroundname
+        common_objects = ['boy', 'girl', 'child', 'man', 'woman', 'cow', 'dog', 'cat', 'car', 'person']
+        common_backgrounds = ['mountains', 'park', 'city', 'beach', 'forest', 'farm', 'grass', 'sky']
+        
+        for obj in common_objects:
+            for bg in common_backgrounds:
+                if obj in filename_lower and bg in filename_lower:
+                    return obj, bg
+        
+        return None, None
     
     def get_all_images_info(self):
         """Get information about all stored images"""
-        if not self.connected:
-            return []
-        try:
-            return list(self.collection.find({}, {'image_id': 1, 'filename': 1, 'object_type': 1, 'background_type': 1, 'description': 1}))
-        except Exception as e:
-            st.error(f"Error getting images info: {str(e)}")
-            return []
+        return list(self.collection.find({}, {'image_id': 1, 'filename': 1, 'object_type': 1, 'background_type': 1, 'description': 1}))
     
     def close_connection(self):
         """Close database connection"""
-        if self.connected:
-            self.client.close()
+        self.client.close()
 
-@st.cache_resource
+# Modified functions to work with database
 def setup_detectron():
     """Setup Detectron2 configuration with enhanced object detection parameters"""
-    try:
-        cfg = get_cfg()
-        cfg.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml"))
-        cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.65
-        cfg.MODEL.ROI_HEADS.NMS_THRESH_TEST = 0.5
-        cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 512
-        cfg.MODEL.ROI_HEADS.NUM_CLASSES = 80
-        cfg.MODEL.DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-        cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml")
-        return DefaultPredictor(cfg)
-    except Exception as e:
-        st.error(f"Error setting up Detectron2: {str(e)}")
-        return None
+    cfg = get_cfg()
+    cfg.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml"))
+    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.65
+    cfg.MODEL.ROI_HEADS.NMS_THRESH_TEST = 0.5
+    cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 512
+    cfg.MODEL.ROI_HEADS.NUM_CLASSES = 80
+    cfg.MODEL.DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml")
+    return DefaultPredictor(cfg)
+
 
 def get_refined_object_mask_and_box(image, class_label=None):
-    """Get refined mask and bounding box for objects with improved boundary detection"""
+    """Get refined mask and bounding box for objects with improved boundary detection and better class matching"""
     predictor = setup_detectron()
-    if predictor is None:
-        return None, None
-        
     outputs = predictor(cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
     
     instances = outputs["instances"].to("cpu")
     if len(instances) == 0:
-        st.warning("⚠️ No objects detected in image")
+        print(f"⚠️ No objects detected in image")
         return None, None
     
     masks = instances.pred_masks.numpy()
@@ -329,18 +284,23 @@ def get_refined_object_mask_and_box(image, class_label=None):
     scores = instances.scores.numpy()
     classes = instances.pred_classes.numpy()
     
-    # Enhanced class mapping
+    # Enhanced class mapping with better specificity and priority
     class_id_map = {
+        # Humans - person class (0)
         "person": [0], "boy": [0], "girl": [0], "child": [0], "man": [0], "woman": [0],
         "knight": [0], "footballer": [0],
-        "monkey": [16, 17, 18, 19, 20, 21, 22, 23],
+        
+        # Animals - specific classes with higher priority
+        "monkey": [16, 17, 18, 19, 20, 21, 22, 23],  # Prioritize animal classes for monkey
         "cow": [19], "cattle": [19], 
         "dog": [16], "cat": [15], "horse": [17], "sheep": [18],
         "bird": [14], "elephant": [20], "bear": [21], "zebra": [22], "giraffe": [23],
+        
+        # Vehicles
         "car": [2], "truck": [7], "bus": [5], "motorcycle": [3], "bicycle": [1]
     }
     
-    # COCO class names
+    # COCO class names for better debugging
     coco_class_names = {
         0: 'person', 1: 'bicycle', 2: 'car', 3: 'motorcycle', 4: 'airplane', 5: 'bus',
         6: 'train', 7: 'truck', 8: 'boat', 9: 'traffic light', 10: 'fire hydrant',
@@ -353,77 +313,89 @@ def get_refined_object_mask_and_box(image, class_label=None):
     
     # Print detected objects for debugging
     detected_objects = [coco_class_names.get(cls, f"class_{cls}") for cls in classes]
-    st.info(f"🔍 Detected objects: {detected_objects}")
-    st.info(f"📊 Detection scores: {[f'{s:.3f}' for s in scores]}")
+    print(f"🔍 Detected objects: {detected_objects}")
+    print(f"📊 Detection scores: {[f'{s:.3f}' for s in scores]}")
     
     # Filter by class if specified
     if class_label is not None:
         class_label_lower = class_label.lower()
-        st.info(f"🎯 Looking specifically for: {class_label_lower}")
+        print(f"🎯 Looking specifically for: {class_label_lower}")
         
         if class_label_lower in class_id_map:
             target_classes = class_id_map[class_label_lower]
             
-            # Special handling for monkey
+            # Special handling for monkey - prioritize any animal over person/car
             if class_label_lower == "monkey":
-                animal_classes = [14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+                # First try to find any animal class
+                animal_classes = [14, 15, 16, 17, 18, 19, 20, 21, 22, 23]  # All animal classes
                 animal_indices = np.isin(classes, animal_classes)
                 if any(animal_indices):
                     selected_indices = animal_indices
-                    st.success(f"✅ Found animal for monkey: {[coco_class_names.get(cls, cls) for cls in classes[animal_indices]]}")
+                    print(f"✅ Found animal for monkey: {[coco_class_names.get(cls, cls) for cls in classes[animal_indices]]}")
                 else:
+                    # If no animals, try person as very last resort
                     person_indices = np.isin(classes, [0])
                     if any(person_indices):
                         selected_indices = person_indices
-                        st.warning("⚠️ Using person as fallback for monkey")
+                        print(f"⚠️ Using person as fallback for monkey")
             else:
+                # Normal class matching
                 class_indices = np.isin(classes, target_classes)
                 if any(class_indices):
                     selected_indices = class_indices
-                    st.success(f"✅ Found {sum(class_indices)} {class_label} object(s)")
+                    print(f"✅ Found {sum(class_indices)} {class_label} object(s)")
                 else:
-                    st.warning(f"⚠️ No {class_label} detected")
+                    print(f"⚠️ No {class_label} detected")
+                    
+                    # Fallback logic for human-like objects
                     if class_label_lower in ["knight", "footballer", "boy", "girl", "child", "man", "woman"]:
-                        person_indices = np.isin(classes, [0])
+                        person_indices = np.isin(classes, [0])  # Person class
                         if any(person_indices):
                             selected_indices = person_indices
-                            st.success("✅ Found person-like object as fallback")
+                            print(f"✅ Found person-like object as fallback")
         else:
-            st.warning(f"⚠️ Unknown class {class_label}, trying fallback to any suitable object")
+            print(f"⚠️ Unknown class {class_label}, trying fallback to any suitable object")
     
-    # If no specific class found, use smart selection
+    # If no specific class found or no class specified, use smart selection
     if selected_indices is None:
+        # Prioritize selection based on confidence and class relevance
         confidence_threshold = 0.3
         high_confidence_indices = scores > confidence_threshold
         
         if any(high_confidence_indices):
+            # Among high confidence objects, prioritize non-vehicle classes if possible
             high_conf_classes = classes[high_confidence_indices]
             high_conf_scores = scores[high_confidence_indices]
             
-            vehicle_classes = [1, 2, 3, 5, 6, 7, 8]
+            # Avoid vehicles if we have other options
+            vehicle_classes = [1, 2, 3, 5, 6, 7, 8]  # bicycle, car, motorcycle, bus, train, truck, boat
             non_vehicle_mask = ~np.isin(high_conf_classes, vehicle_classes)
             
             if any(non_vehicle_mask):
+                # Select best non-vehicle
                 best_non_vehicle_idx = np.argmax(high_conf_scores[non_vehicle_mask])
                 original_idx = np.where(high_confidence_indices)[0][np.where(non_vehicle_mask)[0][best_non_vehicle_idx]]
                 selected_indices = np.zeros(len(classes), dtype=bool)
                 selected_indices[original_idx] = True
-                st.success(f"✅ Selected best non-vehicle object: {coco_class_names.get(classes[original_idx], 'unknown')}")
+                print(f"✅ Selected best non-vehicle object: {coco_class_names.get(classes[original_idx], 'unknown')}")
             else:
+                # All are vehicles, select best one
                 best_vehicle_idx = np.argmax(high_conf_scores)
                 original_idx = np.where(high_confidence_indices)[0][best_vehicle_idx]
                 selected_indices = np.zeros(len(classes), dtype=bool)
                 selected_indices[original_idx] = True
-                st.success(f"✅ Selected best vehicle object: {coco_class_names.get(classes[original_idx], 'unknown')}")
+                print(f"✅ Selected best vehicle object: {coco_class_names.get(classes[original_idx], 'unknown')}")
         else:
-            st.warning("⚠️ No high-confidence objects, lowering threshold...")
+            # Lower confidence threshold and try again
+            print("⚠️ No high-confidence objects, lowering threshold...")
             confidence_threshold = 0.15
             any_confidence_indices = scores > confidence_threshold
             if any(any_confidence_indices):
                 selected_indices = any_confidence_indices
             else:
+                # Take the best available
                 selected_indices = np.array([True] * len(masks))
-                st.warning("⚠️ Using all available objects")
+                print("⚠️ Using all available objects")
     
     # Apply selection
     if selected_indices is not None:
@@ -433,33 +405,36 @@ def get_refined_object_mask_and_box(image, class_label=None):
         classes = classes[selected_indices]
     
     if len(masks) == 0:
-        st.error("❌ No valid objects found after filtering")
+        print(f"❌ No valid objects found after filtering")
         return None, None
     
-    # Select the best object
+    # Select the best object (highest confidence among selected)
     best_idx = np.argmax(scores)
     final_mask = masks[best_idx].astype(np.uint8) * 255
     main_box = boxes[best_idx]
     selected_class = classes[best_idx]
     
-    st.success(f"✅ Selected object: {coco_class_names.get(selected_class, 'unknown')} "
-               f"with confidence: {scores[best_idx]:.3f}")
+    print(f"✅ Selected object: {coco_class_names.get(selected_class, 'unknown')} "
+          f"with confidence: {scores[best_idx]:.3f}, "
+          f"area: {(main_box[2] - main_box[0]) * (main_box[3] - main_box[1]):.0f}")
     
-    # Apply mask refinement
+    # Apply advanced mask refinement
     kernel = np.ones((3,3), np.uint8)
     final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_CLOSE, kernel)
     final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_OPEN, kernel)
     
-    # Edge refinement
+    # Edge refinement with adaptive parameters
     mask_area = np.sum(final_mask > 0)
-    if mask_area > 10000:
+    if mask_area > 10000:  # Large objects
         blur_kernel = (7, 7)
         dilate_iterations = 2
-    else:
+    else:  # Small objects
         blur_kernel = (3, 3)
         dilate_iterations = 1
     
     final_mask = cv2.GaussianBlur(final_mask, blur_kernel, 0)
+    
+    # Expand mask slightly to ensure complete object coverage
     kernel = np.ones((3,3), np.uint8)
     final_mask = cv2.dilate(final_mask, kernel, iterations=dilate_iterations)
     
@@ -467,62 +442,79 @@ def get_refined_object_mask_and_box(image, class_label=None):
 
 def inpaint_background(image, mask):
     """Inpaint removed object area using improved background reconstruction"""
+    # Convert mask to proper format for inpainting
     inpaint_mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)[1]
     
+    # Expand mask slightly to cover edge artifacts
     kernel = np.ones((9,9), np.uint8)
     inpaint_mask = cv2.dilate(inpaint_mask, kernel, iterations=2)
     
+    # Convert to BGR for inpainting
     image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
     
+    # Try TELEA method first
     inpainted = cv2.inpaint(image_bgr, inpaint_mask, 15, cv2.INPAINT_TELEA)
     
-    if np.sum(inpaint_mask) / 255 > 10000:
+    # For large areas, also try NS method and blend results
+    if np.sum(inpaint_mask) / 255 > 10000:  # Large area
         inpainted_ns = cv2.inpaint(image_bgr, inpaint_mask, 21, cv2.INPAINT_NS)
+        # Blend both inpainting results for better quality
         alpha = 0.6
         inpainted = cv2.addWeighted(inpainted, alpha, inpainted_ns, 1-alpha, 0)
     
     return cv2.cvtColor(inpainted, cv2.COLOR_BGR2RGB)
 
 def position_object_on_background(object_img, object_mask, object_box, background_img, target_box=None):
-    """Position object on background with enhanced blending"""
+    """Position object on background with enhanced blending and positioning"""
+    # Create a copy of the background to work with
     result = background_img.copy()
     
+    # If no target box is specified, use the center of the background
     if target_box is None:
         bg_height, bg_width = background_img.shape[:2]
         obj_height = object_box[3] - object_box[1]
         obj_width = object_box[2] - object_box[0]
         
+        # Calculate centered position with slight bottom offset for natural placement
         x_center = (bg_width - obj_width) // 2
-        y_center = int((bg_height - obj_height) * 0.6)
+        y_center = int((bg_height - obj_height) * 0.6)  # Place at 60% height for more natural look
         
         target_box = [x_center, y_center, x_center + obj_width, y_center + obj_height]
     
+    # Extract object using mask
     obj_mask_3d = np.stack([object_mask > 127] * 3, axis=2)
     extracted_obj = np.zeros_like(object_img)
     extracted_obj[obj_mask_3d] = object_img[obj_mask_3d]
     
+    # Create masked version of object
     obj_height = int(object_box[3] - object_box[1])
     obj_width = int(object_box[2] - object_box[0])
     
+    # Crop the object and its mask to the bounding box
     cropped_obj = extracted_obj[int(object_box[1]):int(object_box[3]), 
                                int(object_box[0]):int(object_box[2])]
     cropped_mask = object_mask[int(object_box[1]):int(object_box[3]), 
                               int(object_box[0]):int(object_box[2])]
     
+    # Calculate target dimensions
     target_width = int(target_box[2] - target_box[0])
     target_height = int(target_box[3] - target_box[1])
     
+    # Resize object and mask to fit target box
     if obj_width > 0 and obj_height > 0 and target_width > 0 and target_height > 0:
+        # Use INTER_LANCZOS4 for better quality upscaling
         resized_obj = cv2.resize(cropped_obj, (target_width, target_height), 
                                interpolation=cv2.INTER_LANCZOS4)
         resized_mask = cv2.resize(cropped_mask, (target_width, target_height), 
                                 interpolation=cv2.INTER_LANCZOS4)
         
+        # Create region of interest in result image
         y_start = max(0, int(target_box[1]))
         y_end = min(result.shape[0], int(target_box[1])+target_height)
         x_start = max(0, int(target_box[0]))
         x_end = min(result.shape[1], int(target_box[0])+target_width)
         
+        # Adjust object and mask to fit within image bounds
         obj_y_start = max(0, -int(target_box[1]))
         obj_x_start = max(0, -int(target_box[0]))
         obj_y_end = target_height - max(0, int(target_box[1])+target_height - result.shape[0])
@@ -531,28 +523,36 @@ def position_object_on_background(object_img, object_mask, object_box, backgroun
         if y_end > y_start and x_end > x_start and obj_y_end > obj_y_start and obj_x_end > obj_x_start:
             roi = result[y_start:y_end, x_start:x_end]
             
+            # Calculate blending mask with improved edge blending
             blend_mask = resized_mask[obj_y_start:obj_y_end, obj_x_start:obj_x_end].astype(float) / 255.0
             
+            # Apply adaptive Gaussian blur based on object size
             mask_area = np.sum(blend_mask > 0.5)
-            if mask_area > 5000:
+            if mask_area > 5000:  # Large objects
                 blur_size = (11, 11)
-            else:
+            else:  # Small objects
                 blur_size = (7, 7)
             
             blend_mask = cv2.GaussianBlur(blend_mask, blur_size, 0)
             blend_mask = np.stack([blend_mask] * 3, axis=2)
             
+            # Color adjustment for better blending
             obj_part = resized_obj[obj_y_start:obj_y_end, obj_x_start:obj_x_end]
             
+            # Perform blending
             if roi.shape[:2] == obj_part.shape[:2]:
+                # Enhanced blending with improved color matching
                 obj_hsv = cv2.cvtColor(obj_part, cv2.COLOR_RGB2HSV)
                 bg_hsv = cv2.cvtColor(roi, cv2.COLOR_RGB2HSV)
                 
+                # Better color harmony adjustment
+                # Match average hue and saturation more subtly
                 bg_mean_h = np.mean(bg_hsv[:,:,0])
                 bg_mean_s = np.mean(bg_hsv[:,:,1])
                 obj_mean_h = np.mean(obj_hsv[:,:,0])
                 obj_mean_s = np.mean(obj_hsv[:,:,1])
                 
+                # Subtle adjustment towards background color harmony
                 hue_adjust = 0.1 * (bg_mean_h - obj_mean_h) / 180.0
                 sat_adjust = 0.85 + 0.1 * (bg_mean_s - obj_mean_s) / 255.0
                 sat_adjust = np.clip(sat_adjust, 0.7, 1.2)
@@ -562,13 +562,15 @@ def position_object_on_background(object_img, object_mask, object_box, backgroun
                 
                 adjusted_obj = cv2.cvtColor(obj_hsv, cv2.COLOR_HSV2RGB)
                 
+                # Blend with adjusted object
                 blended = roi * (1 - blend_mask) + adjusted_obj * blend_mask
                 result[y_start:y_end, x_start:x_end] = blended
     
     return result
 
 def swap_objects_with_positioning(image1, image2, obj1_class=None, obj2_class=None):
-    """Swap objects between images with improved error handling"""
+    """Swap objects between images with improved error handling and fallback options"""
+    # Ensure images are same size for processing
     height1, width1 = image1.shape[:2]
     height2, width2 = image2.shape[:2]
     
@@ -577,39 +579,42 @@ def swap_objects_with_positioning(image1, image2, obj1_class=None, obj2_class=No
     else:
         image2_resized = image2.copy()
     
-    st.info("🔍 Detecting objects in images...")
-    if obj1_class:
-        st.info(f"   Looking for '{obj1_class}' in first image")
-    if obj2_class:
-        st.info(f"   Looking for '{obj2_class}' in second image")
+    print(f"🔍 Detecting objects in images...")
+    print(f"   Looking for '{obj1_class}' in first image")
+    print(f"   Looking for '{obj2_class}' in second image")
     
+    # Get refined masks and bounding boxes with optional class filtering
     mask1, box1 = get_refined_object_mask_and_box(image1, obj1_class)
     mask2, box2 = get_refined_object_mask_and_box(image2_resized, obj2_class)
     
+    # More detailed error handling
     if mask1 is None or box1 is None:
-        error_msg = f"Could not detect any suitable object in first image"
+        print(f"❌ Could not detect any suitable object in first image")
         if obj1_class:
-            error_msg += f". Specifically looking for: {obj1_class}"
-        st.error(error_msg)
-        raise ValueError(error_msg)
+            print(f"   Specifically looking for: {obj1_class}")
+        raise ValueError(f"Could not detect objects in first image. Requested class: {obj1_class}")
     
     if mask2 is None or box2 is None:
-        error_msg = f"Could not detect any suitable object in second image"
+        print(f"❌ Could not detect any suitable object in second image")
         if obj2_class:
-            error_msg += f". Specifically looking for: {obj2_class}"
-        st.error(error_msg)
-        raise ValueError(error_msg)
+            print(f"   Specifically looking for: {obj2_class}")
+        raise ValueError(f"Could not detect objects in second image. Requested class: {obj2_class}")
     
-    st.success("✅ Successfully detected objects in both images")
+    print(f"✅ Successfully detected objects in both images")
     
-    st.info("🎨 Inpainting backgrounds...")
+    # Fill backgrounds where objects were removed
+    print(f"🎨 Inpainting backgrounds...")
     bg1 = inpaint_background(image1, mask1)
     bg2 = inpaint_background(image2_resized, mask2)
     
-    st.info("🔄 Creating composites...")
+    # Place object 2 on background 1 at position of object 1
+    print(f"🔄 Creating composites...")
     merged1 = position_object_on_background(image2_resized, mask2, box2, bg1, box1)
+    
+    # Place object 1 on background 2 at position of object 2
     merged2 = position_object_on_background(image1, mask1, box1, bg2, box2)
     
+    # Extract objects for visualization
     obj1_mask = mask1 > 127
     obj2_mask = mask2 > 127
     
@@ -620,515 +625,667 @@ def swap_objects_with_positioning(image1, image2, obj1_class=None, obj2_class=No
     
     return (obj1, obj2, bg1, bg2, merged1, merged2)
 
-def parse_simple_prompt(prompt):
-    """Parse simple natural language prompts like 'boy in mountains'"""
-    objects = [
-        "boy", "girl", "child", "person", "man", "woman", "people", "family", 
-        "hiker", "hikers", "knight", "footballer", "player",
-        "monkey", "monkeys", "ape", "apes", "cow", "cows", "cattle", "dog", "dogs", "puppy", 
-        "cat", "cats", "kitten", "horse", "horses", "sheep", "bird", "birds", "elephant", "elephants", "bear", "zebra", "giraffe",
-        "car", "cars", "vehicle", "truck", "bus", "motorcycle", "bike", "bicycle"
-    ]
+def parse_simple_prompt(prompt, custom_object_phrases=None, custom_background_phrases=None):
+    """Parse natural language prompts like 'polar bear in snow' with enhanced phrase recognition"""
+    # Use custom phrases if provided, otherwise use defaults
+    if custom_object_phrases is None:
+        object_phrases = [
+            "polar bear", "grizzly bear", "mr bean", "virat kohli", "ronaldo", "footballer kicking",
+            "boy playing guitar", "monkey sitting", "sheep", "elephant", "sahil", "little girl",
+            "muslim man", "hindu man", "army men", "begger"
+        ]
+    else:
+        object_phrases = custom_object_phrases
     
-    backgrounds = [
-        "mountains", "mountain", "peak", "hills", "hill", "alps", "highlands",
-        "park", "garden", "playground", "field", "yard", "grass", "lawn",
-        "beach", "shore", "coast", "ocean", "sea", "sand", "water",
-        "forest", "woods", "trees", "jungle", "woodland", "nature",
-        "farm", "countryside", "rural", "pasture", "barn", "ranch",
-        "city", "urban", "town", "downtown", "cityscape", "night_city",
-        "sky", "clouds", "air", "heaven", "atmosphere", "sunset", "sunrise",
-        "space", "universe", "stars", "galaxy", "cosmos", "night",
-        "ground", "earth", "soil", "dirt", "land", "road", "path",
-        "stadium", "arena", "sports", "football", "gym", "fitness",
-        "masjid", "mosque", "temple", "church", "building", "house"
-    ]
-    
+    if custom_background_phrases is None:
+        background_phrases = [
+            "snow", "mountains", "park", "garden", "beach", "forest", "city", "masjid", "stadium",
+            "gym", "jungle", "field","village", "desert", "space", "lake", "river","frozen river", 
+            "waterfall", "ocean", "sky","stadium", "football stadium", "cricket stadium", "disneyland"
+            "mosque", "temple", "maidan", "buildings", "warside", 
+        ]
+    else:
+        background_phrases = custom_background_phrases
+
+    # Phrase-aware objects
     prompt_lower = prompt.lower()
-    found_object = None
-    found_background = None
     
-    # Find object
-    for obj in objects:
-        if obj in prompt_lower:
-            found_object = obj
+    single_word_objects = [
+        # Humans
+        "boy", "girl", "child", "person", "man","guy", "woman", "people", "family", 
+        "hiker", "hikers", "knight", "footballer", "player", "guitarist", 
+        "cricketer", "hindu", "muslim", "businessmen", "terrorist", "army", "begger", 
+        
+        # Animals  
+        "monkey", "monkeys", "ape", "apes", "cow", "cows", "cattle", "dog", "dogs", "puppy", 
+        "cat", "cats", "kitten", "horse", "horses", "sheep", "sheeps", "goat", "goats", 
+        "animal", "animals", "bird", "birds", "elephant", "elephants", "bear", "bears",
+        "zebra", "giraffe", "lion", "tiger", "polar_bear", "bear", "monkey sitting", "rhino", "buffalo",
+        "whale", "shark"
+        
+        # Vehicles
+        "car", "cars", "vehicle", "truck", "bus", "motorcycle", "bicycle", "bike", "aeroplane", "boat", "guitar"
+    ]
+    
+    actions = [
+        "playing", "praying", "running", "walking", "sitting", "standing", "eating",
+        "drinking", "sleeping", "climbing", "hiking", "swimming", "fishing", "jumping",
+        "reading", "writing", "dancing", "singing", "talking", "laughing", "kicking",
+        "throwing", "catching", "gazing", "begging"
+    ]
+
+    subject = None
+    location = None
+    action = None
+
+    # Check for phrases first (both custom and default)
+    for phrase in object_phrases:
+        if phrase.lower() in prompt_lower:
+            subject = phrase
+            break
+
+    # Check for single-word objects if no phrase found
+    if not subject:
+        for word in single_word_objects:
+            if word in prompt_lower:
+                subject = word
+                break
+
+    # Check for background phrases
+    for phrase in background_phrases:
+        if phrase.lower() in prompt_lower:
+            location = phrase
+            break
+
+    for word in actions:
+        if word in prompt_lower:
+            action = word
+            break
+
+    # Normalize specific cases
+    if subject:
+        if subject in ["polar bear", "grizzly bear"]:
+            subject = "polar bear"  # Normalize all to polar bear
+        elif subject in ["footballer", "footballer kicking"]:
+            subject = "footballer"
+
+    if location:
+        if location == "snow":
+            location = "snow"  # Ensure it's treated as a background type
+
+    print(f"🔍 Parsed: Subject='{subject}', Location='{location}', Action='{action}'")
+    return subject, location, action
+
+def create_composite_for_pair_db(subject_doc, background_doc, subject, db):
+    """Create a composite image from database documents with better error handling"""
+    try:
+        print(f"📸 Loading images from database...")
+        print(f"   Subject: {subject_doc['filename']}")
+        print(f"   Background: {background_doc['filename']}")
+
+        # Load the images from database
+        subject_image = db.get_image_data(subject_doc['image_id'])
+        background_image = db.get_image_data(background_doc['image_id'])
+
+        if subject_image is None:
+            print(f"❌ Failed to load subject image: {subject_doc['filename']}")
+            return None, False
+
+        if background_image is None:
+            print(f"❌ Failed to load background image: {background_doc['filename']}")
+            return None, False
+
+        print(f"✅ Successfully loaded both images")
+
+        # Fix: Ensure subject image gets subject label for detection
+        object1, object2, background1, background2, merged1, merged2 = swap_objects_with_positioning(
+            subject_image, background_image, subject, None)
+
+        # We want the subject on the background → use merged2 (subject on background)
+        return merged2, True
+
+    except ValueError as ve:
+        print(f"⚠️ Object detection issue: {str(ve)}")
+        return None, False
+    except Exception as e:
+        print(f"❌ Error creating composite for {subject_doc['filename']} + {background_doc['filename']}: {str(e)}")
+        return None, False
+
+def display_single_best_result_db(prompt, db, custom_object_phrases=None, custom_background_phrases=None):
+    """Display only the single best result for a given prompt using database with better error handling"""
+    # Parse the prompt with custom phrases
+    subject, location, action = parse_simple_prompt(prompt, custom_object_phrases, custom_background_phrases)
+    print(f"\n🔍 Parsed prompt - Subject: {subject}, Location: {location}, Action: {action}")
+    
+    if not subject:
+        print("❌ Could not identify a subject in the prompt. Please specify an object.")
+        if custom_object_phrases:
+            print(f"💡 Available custom objects: {', '.join(custom_object_phrases)}")
+        else:
+            print(f"💡 Available objects: boy, girl, person, monkey, cow, dog, cat, bird, car, etc.")
+        return None
+    
+    if not location:
+        print("❌ Could not identify a location in the prompt. Please specify a background.")
+        if custom_background_phrases:
+            print(f"💡 Available custom locations: {', '.join(custom_background_phrases)}")
+        else:
+            print(f"💡 Available locations: mountains, park, beach, forest, city, masjid, stadium, gym, etc.")
+        return None
+    
+    # Search for matching images in database
+    print(f"🔎 Searching for subject: {subject}")
+    subject_matches = db.search_images("object", subject, limit=10)
+    
+    print(f"🔎 Searching for location: {location}")
+    location_matches = db.search_images("background", location, limit=10)
+    
+    print(f"📊 Found {len(subject_matches)} subject matches and {len(location_matches)} location matches")
+    
+    # Enhanced fallback logic with better subject matching
+    if not subject_matches:
+        print(f"⚠️ No direct matches for '{subject}', trying broader search...")
+        # Try broader categories - you can customize this based on your custom phrases
+        fallback_subjects = {
+            "monkey": ["animal", "ape", "monkeys"],
+            "bird": ["animal"], 
+            "person": ["boy", "girl", "man", "woman", "child"],
+            "animal": ["cow", "dog", "cat", "sheep", "horse", "monkey"],
+            "cow": ["animal", "cattle"],
+            "dog": ["animal", "puppy"],
+            "cat": ["animal", "kitten"]
+        }
+        
+        # Add custom fallbacks if custom phrases are provided
+        if custom_object_phrases:
+            # You can add custom fallback logic here based on your specific phrases
+            pass
+        
+        # Try direct fallbacks first
+        for fallback in fallback_subjects.get(subject, []):
+            subject_matches = db.search_images("object", fallback, limit=5)
+            if subject_matches:
+                print(f"✅ Found fallback matches for '{fallback}'")
+                break
+        
+        # If still no matches, try generic "animal" or "person"
+        if not subject_matches:
+            for generic_term in ["animal", "person"]:
+                subject_matches = db.search_images("object", generic_term, limit=5)
+                if subject_matches:
+                    print(f"✅ Found generic matches for '{generic_term}'")
+                    break
+    
+    if not location_matches:
+        print(f"⚠️ No direct matches for '{location}', trying broader search...")
+        # Try related locations
+        fallback_locations = {
+            "beach": ["ocean", "sea", "water", "coast"],
+            "masjid": ["mosque", "religious", "temple"],
+            "mosque": ["masjid", "religious", "temple"],
+            "mountains": ["mountain", "hills", "nature"],
+            "park": ["garden", "field", "outdoor"],
+            "forest": ["woods", "jungle", "trees"],
+            "city": ["urban", "town"],
+            "stadium": ["arena", "field", "sports"],
+            "cricket staium": ["cricket staium"],
+            "football staium": ["football stadium"],
+            "gym": ["fitness", "exercise"]
+        }
+        
+        # Add custom fallbacks if custom phrases are provided
+        if custom_background_phrases:
+            # You can add custom fallback logic here based on your specific phrases
+            pass
+        
+        for fallback in fallback_locations.get(location, []):
+            location_matches = db.search_images("background", fallback, limit=5)
+            if location_matches:
+                print(f"✅ Found fallback matches for '{fallback}'")
+                break
+        
+        # If still no matches, try generic locations
+        if not location_matches:
+            for generic_location in ["park", "field", "outdoor"]:
+                location_matches = db.search_images("background", generic_location, limit=5)
+                if location_matches:
+                    print(f"✅ Found generic matches for '{generic_location}'")
+                    break
+    
+    # If still no matches, get any available images
+    if not subject_matches:
+        print("⚠️ Using any available subject images...")
+        all_images = db.get_all_images_info()
+        subject_matches = [img for img in all_images if img.get('object_type')][:5]
+        for match in subject_matches:
+            match['score'] = 1
+    
+    if not location_matches:
+        print("⚠️ Using any available background images...")
+        all_images = db.get_all_images_info()
+        location_matches = [img for img in all_images if img.get('background_type')][:5]
+        for match in location_matches:
+            match['score'] = 1
+    
+    if not subject_matches or not location_matches:
+        print("❌ No suitable images found in database for creating composite.")
+        print("💡 Try adding more images to the database or use different search terms.")
+        return None
+    
+    # Try multiple combinations until we find one that works
+    print(f"🎯 Attempting to create composite with best matches...")
+    
+    max_attempts = min(3, len(subject_matches) * len(location_matches))
+    attempt = 0
+    
+    for subject_match in subject_matches[:3]:  # Try top 3 subject matches
+        for location_match in location_matches[:3]:  # Try top 3 location matches
+            if attempt >= max_attempts:
+                break
+                
+            attempt += 1
+            print(f"\n🔄 Attempt {attempt}: {subject_match['filename']} + {location_match['filename']}")
+            
+            # Create composite
+            composite, success = create_composite_for_pair_db(subject_match, location_match, subject, db)
+            
+            if success and composite is not None:
+                print(f"✅ Successfully created composite!")
+                
+                # Display the result
+                plt.figure(figsize=(10, 8))
+                plt.imshow(composite)
+                plt.title(f"Result for: '{prompt}'\n{subject_match['filename']} + {location_match['filename']}", 
+                         fontsize=14, fontweight='bold')
+                plt.axis('off')
+                plt.tight_layout()
+                plt.show()
+                
+                # Save the result
+                output_dir = "output"
+                os.makedirs(output_dir, exist_ok=True)
+                prompt_slug = prompt.replace(' ', '_').lower()
+                output_path = os.path.join(output_dir, f"{prompt_slug}_best.jpg")
+                plt.imsave(output_path, composite)
+                print(f"💾 Saved best result to {output_path}")
+                
+                return composite
+            else:
+                print(f"❌ Failed to create composite, trying next combination...")
+    
+    print(f"❌ Failed to create composite after {attempt} attempts.")
+    print("💡 This might be due to:")
+    print("   - Objects not being detected properly in the images")
+    print("   - Images having incompatible formats or sizes")
+    print("   - Try using different images or search terms")
+    
+    return None
+
+def display_all_matching_results_db(prompt, subject_matches, location_matches, db, custom_object_phrases=None, custom_background_phrases=None):
+    """Display only 2 best different combinations with DIFFERENT objects and backgrounds"""
+    if not subject_matches or not location_matches:
+        print("No matching images found for the prompt components.")
+        return
+    
+    print(f"\nFound {len(subject_matches)} subject matches and {len(location_matches)} location matches")
+    print("Creating 2 best combinations with different objects and backgrounds...")
+    
+    # Parse prompt for subject identification with custom phrases
+    subject, location, action = parse_simple_prompt(prompt, custom_object_phrases, custom_background_phrases)
+    
+    # Create output directory
+    output_dir = "output"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    successful_composites = []
+    used_subjects = set()  # Track used subject files
+    used_backgrounds = set()  # Track used background files
+    max_attempts = 10  # Limit attempts to avoid infinite loops
+    
+    print(f"🔍 Searching for diverse combinations...")
+    
+    # Try to find 2 combinations with different subjects AND different backgrounds
+    for attempt in range(max_attempts):
+        if len(successful_composites) >= 2:
+            break
+            
+        best_combo = None
+        best_score = -1
+        
+        # Find the best unused combination
+        for subj_idx, subject_doc in enumerate(subject_matches):
+            for loc_idx, location_doc in enumerate(location_matches):
+                # Check if this combination uses unused subject and background
+                subj_filename = subject_doc['filename']
+                bg_filename = location_doc['filename']
+                
+                # Skip if we've already used this subject or background
+                if subj_filename in used_subjects or bg_filename in used_backgrounds:
+                    continue
+                
+                # Calculate combination score
+                combo_score = subject_doc['score'] + location_doc['score']
+                
+                if combo_score > best_score:
+                    best_score = combo_score
+                    best_combo = (subject_doc, location_doc, subj_filename, bg_filename)
+        
+        # If we found a good unused combination, try to create composite
+        if best_combo:
+            subject_doc, location_doc, subj_filename, bg_filename = best_combo
+            
+            print(f"🔄 Attempt {len(successful_composites) + 1}: {subj_filename} + {bg_filename}")
+            
+            # Create composite
+            composite, success = create_composite_for_pair_db(subject_doc, location_doc, subject, db)
+            
+            if success and composite is not None:
+                # Mark as used
+                used_subjects.add(subj_filename)
+                used_backgrounds.add(bg_filename)
+                
+                successful_composites.append({
+                    'composite': composite,
+                    'subject_file': subj_filename,
+                    'location_file': bg_filename,
+                    'subject_score': subject_doc['score'],
+                    'location_score': location_doc['score'],
+                    'total_score': best_score,
+                    'subject_doc': subject_doc,
+                    'location_doc': location_doc
+                })
+                
+                print(f"✅ Success - Added combination {len(successful_composites)}")
+            else:
+                print(f"❌ Failed to create composite")
+        else:
+            # No more unused combinations available
+            print(f"⚠️ No more unique combinations available after {len(successful_composites)} successful ones")
             break
     
-    # Find background
-    for bg in backgrounds:
-        if bg in prompt_lower:
-            found_background = bg
+    # If we couldn't get 2 different combinations, try with relaxed constraints
+    if len(successful_composites) < 2:
+        print(f"🔄 Trying with relaxed constraints (allowing same background but different subjects)...")
+        used_subjects.clear()  # Reset used subjects, keep used backgrounds
+        
+        for subject_doc in subject_matches:
+            if len(successful_composites) >= 2:
+                break
+                
+            subj_filename = subject_doc['filename']
+            if subj_filename in used_subjects:
+                continue
+                
+            # Find best background that gives different combination
+            for location_doc in location_matches:
+                bg_filename = location_doc['filename']
+                
+                # Check if this would create a truly different combination
+                combo_exists = any(
+                    comp['subject_file'] == subj_filename and comp['location_file'] == bg_filename
+                    for comp in successful_composites
+                )
+                
+                if not combo_exists:
+                    print(f"🔄 Relaxed attempt {len(successful_composites) + 1}: {subj_filename} + {bg_filename}")
+                    
+                    composite, success = create_composite_for_pair_db(subject_doc, location_doc, subject, db)
+                    
+                    if success and composite is not None:
+                        used_subjects.add(subj_filename)
+                        
+                        successful_composites.append({
+                            'composite': composite,
+                            'subject_file': subj_filename,
+                            'location_file': bg_filename,
+                            'subject_score': subject_doc['score'],
+                            'location_score': location_doc['score'],
+                            'total_score': subject_doc['score'] + location_doc['score'],
+                            'subject_doc': subject_doc,
+                            'location_doc': location_doc
+                        })
+                        
+                        print(f"✅ Success - Added combination {len(successful_composites)}")
+                        break
+    
+    total_combinations = len(successful_composites)
+    
+    if total_combinations == 0:
+        print("❌ Could not create any valid combinations.")
+        return []
+    
+    print(f"Displaying {total_combinations} different combinations")
+    
+    # Create the main figure
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+    if total_combinations == 1:
+        axes = [axes]
+    
+    fig.suptitle(f"Top {total_combinations} DIFFERENT Combinations for: '{prompt}'", fontsize=16, fontweight='bold')
+    
+    # Display the combinations
+    for idx, comp_data in enumerate(successful_composites):
+        if idx >= 2:  # Limit to 2 combinations max
             break
+            
+        composite = comp_data['composite']
+        subject_file = comp_data['subject_file']
+        location_file = comp_data['location_file']
+        
+        # Display in subplot
+        ax = axes[idx] if total_combinations > 1 else axes[0]
+        ax.imshow(composite)
+        ax.set_title(f"Combination {idx + 1}\n{subject_file}\n+ {location_file}", 
+                   fontsize=12, fontweight='bold')
+        ax.axis('off')
+        
+        # Save individual result
+        prompt_slug = prompt.replace(' ', '_').lower()
+        output_filename = f"{prompt_slug}_combo_{idx + 1}.jpg"
+        output_path = os.path.join(output_dir, output_filename)
+        plt.imsave(output_path, composite)
+        comp_data['output_path'] = output_path
+        
+        print(f"✅ Saved combination {idx + 1} to {output_path}")
     
-    return found_object, found_background
-
-def display_image_grid(images, titles, cols=3):
-    """Display images in a grid layout"""
-    n_images = len(images)
-    rows = (n_images + cols - 1) // cols
-    
-    for i in range(0, n_images, cols):
-        cols_to_show = st.columns(cols)
-        for j in range(cols):
-            if i + j < n_images:
-                with cols_to_show[j]:
-                    st.image(images[i + j], caption=titles[i + j], use_column_width=True)
-
-def create_collage(images, titles):
-    """Create a collage of all result images"""
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    fig.suptitle('AI Image Swapping Results', fontsize=16, fontweight='bold')
-    
-    for i, (img, title) in enumerate(zip(images, titles)):
-        row = i // 3
-        col = i % 3
-        axes[row, col].imshow(img)
-        axes[row, col].set_title(title, fontsize=12, fontweight='bold')
-        axes[row, col].axis('off')
+    # Hide unused subplot if only 1 combination
+    if total_combinations == 1 and len(axes) > 1:
+        axes[1].axis('off')
     
     plt.tight_layout()
-    return fig
+    plt.show()
+    
+    # Print summary with diversity information
+    print(f"\n📊 Summary:")
+    print(f"Total combinations created: {total_combinations}")
+    print(f"Unique subjects used: {len(used_subjects)}")
+    print(f"Unique backgrounds used: {len(used_backgrounds)}")
+    
+    if successful_composites:
+        print(f"\n🏆 Different combinations created:")
+        for i, comp in enumerate(successful_composites, 1):
+            print(f"{i}. Subject: {comp['subject_file']} + Background: {comp['location_file']} "
+                  f"(Score: {comp['total_score']}) -> {comp.get('output_path', 'Not saved')}")
+        
+        # Check diversity
+        unique_subjects = set(comp['subject_file'] for comp in successful_composites)
+        unique_backgrounds = set(comp['location_file'] for comp in successful_composites)
+        
+        print(f"\n🎯 Diversity Check:")
+        print(f"   Different subjects: {len(unique_subjects)}/{len(successful_composites)}")
+        print(f"   Different backgrounds: {len(unique_backgrounds)}/{len(successful_composites)}")
+        
+        if len(unique_subjects) == len(successful_composites) and len(unique_backgrounds) == len(successful_composites):
+            print("   ✅ Perfect diversity achieved!")
+        elif len(unique_subjects) == len(successful_composites):
+            print("   ✅ All subjects are different")
+        elif len(unique_backgrounds) == len(successful_composites):
+            print("   ✅ All backgrounds are different")
+        else:
+            print("   ⚠️ Some subjects or backgrounds are repeated")
+    
+    return successful_composites
 
-def main():
-    """Main Streamlit application"""
-    # Header
-    st.markdown('<h1 class="main-header">🎨 AI Image Swapping System</h1>', unsafe_allow_html=True)
+def search_diverse_images(db, query_type, search_term, limit=10, exclude_filenames=None):
+    """Enhanced search function that can exclude already used images"""
+    if exclude_filenames is None:
+        exclude_filenames = set()
+    
+    # Get all matches first
+    all_matches = db.search_images(query_type, search_term, limit=limit*2)  # Get more to filter
+    
+    # Filter out excluded filenames
+    filtered_matches = []
+    for match in all_matches:
+        if match['filename'] not in exclude_filenames:
+            filtered_matches.append(match)
+        if len(filtered_matches) >= limit:
+            break
+    
+    return filtered_matches
+
+
+def main_interactive_db_with_custom_phrases():
+    """Enhanced main interactive function that allows custom object and background phrases"""
+    print("🎨 AI Image Swapping System with Database Storage and Custom Phrases")
+    print("=" * 60)
     
     # Initialize database
     db = ImageDatabase()
     
-    # Feature cards
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown("""
-        <div class="feature-card">
-            <h3>🤖 Smart Detection</h3>
-            <p>Advanced AI object detection with Detectron2</p>
-        </div>
-        """, unsafe_allow_html=True)
+    # Custom phrase storage
+    custom_object_phrases = None
+    custom_background_phrases = None
     
-    with col2:
-        st.markdown("""
-        <div class="feature-card">
-            <h3>🔄 Seamless Swapping</h3>
-            <p>Natural object swapping with background inpainting</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col3:
-        st.markdown("""
-        <div class="feature-card">  
-            <h3>💾 Smart Storage</h3>
-            <p>MongoDB-powered image database with intelligent search</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Sidebar
-    st.sidebar.title("🎛️ Control Panel")
-    
-    # Main tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["🔄 Image Swapping", "💾 Database Manager", "🔍 Search & Swap", "📊 Analytics"])
-    
-    with tab1:
-        st.header("🔄 Direct Image Swapping")
+    while True:
+        print("\nOptions:")
+        print("1. Add images to database from folder")
+        print("2. Set custom object phrases")
+        print("3. Set custom background phrases")
+        print("4. Search and create single best composite")
+        print("5. Search and show DIFFERENT matching combinations")
+        print("6. View current custom phrases")
+        print("7. Reset to default phrases")
+        print("8. View database statistics")
+        print("9. Exit")
         
-        col1, col2 = st.columns(2)
+        choice = input("\nEnter your choice (1-9): ").strip()
         
-        with col1:
-            st.markdown('<div class="upload-area">', unsafe_allow_html=True)
-            st.subheader("📤 Upload First Image")
-            uploaded_file1 = st.file_uploader("Choose first image", type=['jpg', 'jpeg', 'png'], key="img1")
-            obj1_class = st.text_input("Object type in first image (optional)", 
-                                     placeholder="e.g., boy, car, dog", key="obj1")
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown('<div class="upload-area">', unsafe_allow_html=True)
-            st.subheader("📤 Upload Second Image")
-            uploaded_file2 = st.file_uploader("Choose second image", type=['jpg', 'jpeg', 'png'], key="img2")
-            obj2_class = st.text_input("Object type in second image (optional)", 
-                                     placeholder="e.g., girl, tree, cat", key="obj2")
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        if uploaded_file1 and uploaded_file2:
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                image1 = np.array(Image.open(uploaded_file1))
-                st.image(image1, caption="First Image", use_column_width=True)
-                st.markdown(f'<div class="image-info">📏 Size: {image1.shape[1]}x{image1.shape[0]} px</div>', unsafe_allow_html=True)
-            
-            with col2:
-                image2 = np.array(Image.open(uploaded_file2))
-                st.image(image2, caption="Second Image", use_column_width=True)
-                st.markdown(f'<div class="image-info">📏 Size: {image2.shape[1]}x{image2.shape[0]} px</div>', unsafe_allow_html=True)
-            
-            if st.button("🔄 Swap Objects", key="swap_btn"):
-                try:
-                    with st.spinner("🤖 Processing images... This may take a moment"):
-                        progress_bar = st.progress(0)
-                        
-                        progress_bar.progress(20)
-                        st.info("🔍 Analyzing images and detecting objects...")
-                        
-                        obj1_input = obj1_class.strip() if obj1_class.strip() else None
-                        obj2_input = obj2_class.strip() if obj2_class.strip() else None
-                        
-                        progress_bar.progress(40)
-                        results = swap_objects_with_positioning(image1, image2, obj1_input, obj2_input)
-                        
-                        progress_bar.progress(80)
-                        obj1, obj2, bg1, bg2, merged1, merged2 = results
-                        
-                        progress_bar.progress(100)
-                        st.success("✅ Image swapping completed successfully!")
-                        
-                        # Display results
-                        st.header("🎯 Swapping Results")
-                        
-                        # Create tabs for different views
-                        result_tab1, result_tab2, result_tab3 = st.tabs(["🔄 Final Results", "🎭 Components", "📊 Collage"])
-                        
-                        with result_tab1:
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.subheader("🎨 Object 2 → Background 1")
-                                st.image(merged1, use_column_width=True)
-                            with col2:
-                                st.subheader("🎨 Object 1 → Background 2")
-                                st.image(merged2, use_column_width=True)
-                        
-                        with result_tab2:
-                            st.subheader("🧩 Extracted Components")
-                            display_image_grid(
-                                [obj1, obj2, bg1, bg2],
-                                ["Extracted Object 1", "Extracted Object 2", "Background 1", "Background 2"],
-                                cols=2
-                            )
-                        
-                        with result_tab3:
-                            st.subheader("🖼️ Complete Collage")
-                            collage_fig = create_collage(
-                                [obj1, obj2, bg1, bg2, merged1, merged2],
-                                ["Object 1", "Object 2", "Background 1", "Background 2", "Result 1", "Result 2"]
-                            )
-                            st.pyplot(collage_fig)
-                        
-                        # Download buttons
-                        st.header("💾 Download Results")
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            # Convert to PIL for download
-                            result1_pil = Image.fromarray(merged1.astype('uint8'))
-                            buf1 = io.BytesIO()
-                            result1_pil.save(buf1, format='PNG')
-                            st.download_button(
-                                label="📥 Download Result 1",
-                                data=buf1.getvalue(),
-                                file_name="swapped_result_1.png",
-                                mime="image/png"
-                            )
-                        
-                        with col2:
-                            result2_pil = Image.fromarray(merged2.astype('uint8'))
-                            buf2 = io.BytesIO()
-                            result2_pil.save(buf2, format='PNG')
-                            st.download_button(
-                                label="📥 Download Result 2",
-                                data=buf2.getvalue(),
-                                file_name="swapped_result_2.png",
-                                mime="image/png"
-                            )
-                        
-                except Exception as e:
-                    st.error(f"❌ Error during swapping: {str(e)}")
-                    st.error("Please try with different images or check if objects are clearly visible")
-    
-    with tab2:
-        st.header("💾 Database Manager")
-        
-        if not db.connected:
-            st.error("❌ Database not connected. Please ensure MongoDB is running.")
-            st.info("💡 To use the database features, make sure MongoDB is installed and running on localhost:27017")
-        else:
-            st.success("✅ Database connected successfully")
-            
-            # Upload to database
-            st.subheader("📤 Add Image to Database")
-            
-            col1, col2 = st.columns([2, 1])
-            
-            with col1:
-                db_upload = st.file_uploader("Choose image for database", type=['jpg', 'jpeg', 'png'], key="db_upload")
-                
-                if db_upload:
-                    preview_img = Image.open(db_upload)
-                    st.image(preview_img, caption="Preview", use_column_width=True)
-            
-            with col2:
-                object_type = st.selectbox("Object Type", [
-                    "boy", "girl", "child", "person", "man", "woman",
-                    "monkey", "cow", "dog", "cat", "bird", "elephant", "sheep",
-                    "car", "knight", "footballer"
-                ])
-                
-                background_type = st.selectbox("Background Type", [
-                    "mountains", "park", "beach", "forest", "farm", "city",
-                    "sky", "space", "grass", "ground", "stadium", "gym", "masjid", "field"
-                ])
-                
-                description = st.text_area("Description (optional)", 
-                                         placeholder="Additional details about the image...")
-            
-            if st.button("💾 Save to Database") and db_upload:
-                try:
-                    # Convert image to bytes
-                    img_bytes = db_upload.getvalue()
-                    filename = db_upload.name
-                    
-                    # Store in database
-                    result_id = db.store_image(img_bytes, filename, object_type, background_type, description)
-                    
-                    if result_id:
-                        st.success(f"✅ Image saved successfully! ID: {result_id}")
-                    else:
-                        st.error("❌ Failed to save image")
-                        
-                except Exception as e:
-                    st.error(f"❌ Error saving image: {str(e)}")
-            
-            # Display stored images
-            st.subheader("📋 Stored Images")
-            
-            if st.button("🔄 Refresh Database View"):
-                st.rerun()
-            
-            try:
-                stored_images = db.get_all_images_info()
-                
-                if stored_images:
-                    st.info(f"📊 Total images in database: {len(stored_images)}")
-                    
-                    # Create a dataframe for better display
-                    import pandas as pd
-                    df_data = []
-                    for img in stored_images:
-                        df_data.append({
-                            'Filename': img.get('filename', 'N/A'),
-                            'Object': img.get('object_type', 'N/A'),
-                            'Background': img.get('background_type', 'N/A'),
-                            'Description': img.get('description', 'N/A')[:50] + '...' if len(img.get('description', '')) > 50 else img.get('description', 'N/A')
-                        })
-                    
-                    df = pd.DataFrame(df_data)
-                    st.dataframe(df, use_container_width=True)
-                else:
-                    st.info("📭 No images stored in database yet")
-                    
-            except Exception as e:
-                st.error(f"❌ Error retrieving stored images: {str(e)}")
-    
-    with tab3:
-        st.header("🔍 Search & Swap")
-        
-        if not db.connected:
-            st.error("❌ Database not connected. Search functionality unavailable.")
-        else:
-            st.info("🎯 Upload one image and find a matching image from the database to swap with")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("📤 Upload Your Image")
-                search_upload = st.file_uploader("Choose your image", type=['jpg', 'jpeg', 'png'], key="search_upload")
-                
-                if search_upload:
-                    user_image = np.array(Image.open(search_upload))
-                    st.image(user_image, caption="Your Image", use_column_width=True)
-                    
-                    user_obj_class = st.text_input("Object in your image", 
-                                                 placeholder="e.g., boy, car, dog", key="user_obj")
-            
-            with col2:
-                st.subheader("🔍 Search Database")
-                
-                # Simple search
-                search_prompt = st.text_input("Search for", 
-                                            placeholder="e.g., 'boy in mountains' or 'dog in park'", 
-                                            key="search_prompt")
-                
-                # Advanced search
-                with st.expander("🔧 Advanced Search"):
-                    search_type = st.selectbox("Search by", ["object", "background"])
-                    search_term = st.text_input("Search term", key="advanced_search")
-                
-                if st.button("🔍 Search"):
-                    if search_prompt:
-                        # Parse simple prompt
-                        obj, bg = parse_simple_prompt(search_prompt)
-                        if obj:
-                            search_results = db.search_images("object", obj, limit=5)
-                        elif bg:
-                            search_results = db.search_images("background", bg, limit=5)
-                        else:
-                            st.warning("⚠️ Could not understand search prompt. Try 'object in background' format.")
-                            search_results = []
-                    elif search_term:
-                        search_results = db.search_images(search_type, search_term, limit=5)
-                    else:
-                        st.warning("⚠️ Please enter a search term")
-                        search_results = []
-                    
-                    if search_results:
-                        st.success(f"✅ Found {len(search_results)} matching images")
-                        
-                        # Display search results
-                        for i, result in enumerate(search_results):
-                            with st.container():
-                                st.markdown(f"**Result {i+1}** - Score: {result.get('score', 0)}")
-                                
-                                try:
-                                    db_image = db.get_image_data(result['image_id'])
-                                    if db_image is not None:
-                                        col_img, col_info = st.columns([1, 1])
-                                        
-                                        with col_img:
-                                            st.image(db_image, use_column_width=True)
-                                        
-                                        with col_info:
-                                            st.write(f"**Object:** {result.get('object_type', 'N/A')}")
-                                            st.write(f"**Background:** {result.get('background_type', 'N/A')}")
-                                            st.write(f"**Description:** {result.get('description', 'N/A')}")
-                                            
-                                            if search_upload and st.button(f"🔄 Swap with Result {i+1}", key=f"swap_{i}"):
-                                                try:
-                                                    with st.spinner("🤖 Swapping images..."):
-                                                        user_obj_input = user_obj_class.strip() if user_obj_class.strip() else None
-                                                        db_obj_input = result.get('object_type')
-                                                        
-                                                        swap_results = swap_objects_with_positioning(
-                                                            user_image, db_image, user_obj_input, db_obj_input
-                                                        )
-                                                        
-                                                        obj1, obj2, bg1, bg2, merged1, merged2 = swap_results
-                                                        
-                                                        st.success("✅ Swap completed!")
-                                                        
-                                                        # Display results
-                                                        result_col1, result_col2 = st.columns(2)
-                                                        with result_col1:
-                                                            st.image(merged1, caption="Database object → Your background", use_column_width=True)
-                                                        with result_col2:
-                                                            st.image(merged2, caption="Your object → Database background", use_column_width=True)
-                                                
-                                                except Exception as e:
-                                                    st.error(f"❌ Swap failed: {str(e)}")
-                                    else:
-                                        st.error("❌ Could not load image from database")
-                                        
-                                except Exception as e:
-                                    st.error(f"❌ Error displaying result: {str(e)}")
-                                
-                                st.markdown("---")
-                    else:
-                        st.info("📭 No matching images found")
-    
-    with tab4:
-        st.header("📊 System Analytics")
-        
-        # System information
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown("""
-            <div class="metric-box">
-                <h4>🤖 AI Model</h4>
-                <p>Detectron2 + Mask R-CNN</p>
-                <p>Device: """ + ("CUDA" if torch.cuda.is_available() else "CPU") + """</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown("""
-            <div class="metric-box">
-                <h4>💾 Database</h4>
-                <p>MongoDB + GridFS</p>
-                <p>Status: """ + ("Connected" if db.connected else "Disconnected") + """</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col3:
-            if db.connected:
-                try:
-                    image_count = len(db.get_all_images_info())
-                    st.markdown(f"""
-                    <div class="metric-box">
-                        <h4>📈 Statistics</h4>
-                        <p>Stored Images: {image_count}</p>
-                        <p>Available Classes: 23</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                except:
-                    st.markdown("""
-                    <div class="metric-box">
-                        <h4>📈 Statistics</h4>
-                        <p>Unable to fetch stats</p>
-                    </div>
-                    """, unsafe_allow_html=True)
+        if choice == '1':
+            folder_path = input("Enter path to images folder: ").strip()
+            if os.path.exists(folder_path):
+                db.populate_from_folder(folder_path)
             else:
-                st.markdown("""
-                <div class="metric-box">
-                    <h4>📈 Statistics</h4>
-                    <p>Database unavailable</p>
-                </div>
-                """, unsafe_allow_html=True)
+                print("❌ Folder not found!")
         
-        # Performance tips
-        st.subheader("💡 Performance Tips")
-        st.info("""
-        **For Best Results:**
-        - Use clear, high-contrast images
-        - Ensure objects are well-lit and unobstructed
-        - Specify object types when possible
-        - Use images with resolution between 800x600 and 2000x1500 pixels
-        - Avoid images with too many overlapping objects
-        """)
+        elif choice == '2':
+            print("\nSet custom object phrases (comma-separated):")
+            print("Example: polar bear, monkey sitting, footballer kicking, elephant")
+            phrases_input = input("Enter object phrases: ").strip()
+            if phrases_input:
+                custom_object_phrases = [phrase.strip() for phrase in phrases_input.split(',')]
+                print(f"✅ Set {len(custom_object_phrases)} custom object phrases")
+            else:
+                print("❌ No phrases entered")
         
-        # Supported objects
-        st.subheader("🎯 Supported Object Types")
-        supported_objects = [
-            "People: boy, girl, child, person, man, woman, knight, footballer",
-            "Animals: monkey, cow, dog, cat, bird, elephant, sheep, horse, bear, zebra, giraffe",
-            "Vehicles: car, truck, bus, motorcycle, bicycle"
-        ]
+        elif choice == '3':
+            print("\nSet custom background phrases (comma-separated):")
+            print("Example: snow mountains, football stadium, masjid courtyard, beach sunset")
+            phrases_input = input("Enter background phrases: ").strip()
+            if phrases_input:
+                custom_background_phrases = [phrase.strip() for phrase in phrases_input.split(',')]
+                print(f"✅ Set {len(custom_background_phrases)} custom background phrases")
+            else:
+                print("❌ No phrases entered")
         
-        for obj_type in supported_objects:
-            st.markdown(f"• {obj_type}")
+        elif choice == '4':
+            prompt = input("\nEnter your prompt: ").strip()
+            if prompt:
+                result = display_single_best_result_db(prompt, db, custom_object_phrases, custom_background_phrases)
+                if result is not None:
+                    print("✅ Best result displayed and saved!")
         
-        # Supported backgrounds
-        st.subheader("🌄 Supported Background Types")
-        supported_backgrounds = [
-            "Nature: mountains, park, beach, forest, farm, sky, grass, field",
-            "Urban: city, stadium, gym, building, road",
-            "Special: space, masjid, ground"
-        ]
+        elif choice == '5':
+            prompt = input("\nEnter your prompt: ").strip()
+            if prompt:
+                subject, location, action = parse_simple_prompt(prompt, custom_object_phrases, custom_background_phrases)
+                
+                if subject and location:
+                    subject_matches = db.search_images("object", subject, limit=10) if subject else []
+                    location_matches = db.search_images("background", location, limit=10) if location else []
+                    
+                    if subject_matches and location_matches:
+                        print(f"🔍 Found {len(subject_matches)} subject matches and {len(location_matches)} background matches")
+                        print("🎯 Ensuring different objects and backgrounds in each combination...")
+                        
+                        results = display_all_matching_results_db(prompt, subject_matches, location_matches, db, 
+                                                                custom_object_phrases, custom_background_phrases)
+                        
+                        if results:
+                            print(f"✅ Generated {len(results)} diverse combinations!")
+                        else:
+                            print("❌ Could not create any successful combinations.")
+                    else:
+                        print("❌ No matching images found for this prompt.")
+                        if not subject_matches:
+                            print(f"   No matches found for subject: {subject}")
+                        if not location_matches:
+                            print(f"   No matches found for location: {location}")
+                else:
+                    print("❌ Could not parse the prompt properly.")
+                    if custom_object_phrases and custom_background_phrases:
+                        print("💡 Make sure your prompt includes phrases from your custom lists")
+                    else:
+                        print("💡 Please use format like: 'boy in mountains', 'cow in farm', 'monkey in forest'")
         
-        for bg_type in supported_backgrounds:
-            st.markdown(f"• {bg_type}")
-    
-    # Footer
-    st.markdown("---")
-    st.markdown("""
-    <div style="text-align: center; color: #666; padding: 2rem;">
-        <p>🎨 AI Image Swapping System | Powered by Detectron2 & Streamlit</p>
-        <p>For best results, ensure MongoDB is running and use clear, well-lit images</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Cleanup
-    if db.connected:
-        db.close_connection()
+        elif choice == '6':
+            print("\n📋 Current Custom Phrases:")
+            if custom_object_phrases:
+                print(f"Object phrases ({len(custom_object_phrases)}): {', '.join(custom_object_phrases)}")
+            else:
+                print("Object phrases: Using defaults")
+            
+            if custom_background_phrases:
+                print(f"Background phrases ({len(custom_background_phrases)}): {', '.join(custom_background_phrases)}")
+            else:
+                print("Background phrases: Using defaults")
+        
+        elif choice == '7':
+            custom_object_phrases = None
+            custom_background_phrases = None
+            print("✅ Reset to default phrases")
+        
+        elif choice == '8':
+            images_info = db.get_all_images_info()
+            print(f"\n📊 Database Statistics:")
+            print(f"Total images: {len(images_info)}")
+            
+            # Count by object types
+            object_types = {}
+            background_types = {}
+            for img in images_info:
+                obj_type = img.get('object_type', 'unknown')
+                bg_type = img.get('background_type', 'unknown')
+                object_types[obj_type] = object_types.get(obj_type, 0) + 1
+                background_types[bg_type] = background_types.get(bg_type, 0) + 1
+            
+            print(f"\nObject types: {dict(sorted(object_types.items()))}")
+            print(f"Background types: {dict(sorted(background_types.items()))}")
+            
+            # Show diversity potential
+            print(f"\n🎯 Diversity Potential:")
+            print(f"Maximum different combinations possible: {len(object_types)} × {len(background_types)} = {len(object_types) * len(background_types)}")
+        
+        elif choice == '9':
+            print("👋 Goodbye!")
+            db.close_connection()
+            break
+        
+        else:
+            print("❌ Invalid choice. Please try again.")
 
+# Example usage:
 if __name__ == "__main__":
-    main()
+    # You can now call the main function with custom phrase support
+    main_interactive_db_with_custom_phrases()
+    
